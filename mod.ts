@@ -1,6 +1,6 @@
 const noop = () => {};
 
-type Operation = readonly [() => void, Promise<void>];
+type Operation = readonly [() => void, Promise<unknown>];
 
 class DelayedWriterError extends Error {
   constructor(message: string) {
@@ -44,7 +44,7 @@ export class DelayedWriter {
 
   private createTextOperation(text: string): () => Operation {
     return () => {
-      const promise = this.writer.write(this.encoder.encode(text)).then(noop);
+      const promise = this.writer.write(this.encoder.encode(text));
 
       return [noop, promise] as const;
     };
