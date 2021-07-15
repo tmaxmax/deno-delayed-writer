@@ -1,6 +1,8 @@
+import { readline } from "https://deno.land/x/readline@v1.1.0/mod.ts";
+
 const noop = () => {};
 
-type Operation = readonly [() => void, Promise<unknown>];
+type Operation = () => readonly [() => void, Promise<unknown>];
 
 class DelayedWriterError extends Error {
   constructor(message: string) {
@@ -9,11 +11,14 @@ class DelayedWriterError extends Error {
 }
 
 export class DelayedWriter {
-  private readonly operationQueue: (() => Operation)[] = [];
+  private readonly operationQueue: Operation[] = [];
   private readonly encoder = new TextEncoder();
+  private readonly decoder = new TextDecoder();
+  private readonly inputs: string[] = [];
   private isExecuting = false;
 
   constructor(
+    private readonly reader: Deno.Reader = Deno.stdin,
     private readonly writer: Deno.Writer = Deno.stdout,
     private time = 500,
   ) {}
@@ -26,8 +31,8 @@ export class DelayedWriter {
     }
   }
 
-  private createWaitOperation(time: number): () => Operation {
-    return () => {
+  private pushWaitOperation(time: number) {
+    this.operationQueue.push(() => {
       let clearFn: () => void;
       const promise = new Promise<void>((resolve, reject) => {
         const handle = setTimeout(resolve, time);
@@ -39,52 +44,84 @@ export class DelayedWriter {
       });
 
       return [clearFn!, promise] as const;
-    };
+    });
   }
 
-  private createTextOperation(text: string): () => Operation {
-    return () => {
+  private pushTextOperation(text: string) {
+    this.operationQueue.push(() => {
       const promise = this.writer.write(this.encoder.encode(text));
 
       return [noop, promise] as const;
-    };
+    });
   }
 
-  wait(time = this.time): this {
-    this.assertNotExecuting();
-    this.time = time;
-    this.operationQueue.push(this.createWaitOperation(time));
-    return this;
-  }
+  private pushWriteOperation(text: string, time: number) {
+    if (time === 0) {
+      this.pushTextOperation(text);
 
-  write(text: string, time = this.time): this {
-    this.assertNotExecuting();
-
-    this.time = time;
+      return;
+    }
 
     const delayBetweenLetters = (time / text.length) | 0;
     let first = false;
     for (const letter of text) {
       if (!first) {
-        this.operationQueue.push(this.createWaitOperation(delayBetweenLetters));
+        this.pushWaitOperation(delayBetweenLetters);
       } else {
         first = true;
       }
 
-      this.operationQueue.push(this.createTextOperation(letter));
+      this.pushTextOperation(letter);
+    }
+  }
+
+  private pushInputOperation(prompt: string | undefined, time: number) {
+    if (prompt) {
+      this.pushWriteOperation(prompt, time);
     }
 
+    this.operationQueue.push(() => {
+      const it = readline(this.reader);
+
+      const promise = it.next().then(({ value }) => {
+        this.inputs.push(this.decoder.decode(value));
+      });
+
+      return [noop, promise] as const;
+    });
+  }
+
+  wait(time = this.time): this {
+    this.assertNotExecuting();
+    this.time = time;
+    this.pushWaitOperation(time);
     return this;
   }
 
-  async do(abort?: AbortSignal): Promise<void> {
+  write(text: string, time = this.time): this {
+    this.assertNotExecuting();
+    this.time = time;
+    this.pushWriteOperation(text, time);
+    return this;
+  }
+
+  input(prompt?: string, time = this.time): this {
+    this.assertNotExecuting();
+    this.time = time;
+    this.pushInputOperation(prompt, time);
+    return this;
+  }
+
+  async do(abort?: AbortSignal): Promise<string[]> {
     this.isExecuting = true;
 
     let lastCancelFn: () => void;
+    let inputs: string[];
 
     const cleanup = () => {
       abort?.removeEventListener("abort", lastCancelFn);
       this.operationQueue.splice(0);
+      inputs = this.inputs.splice(0);
       this.isExecuting = false;
     };
 
@@ -109,20 +146,22 @@ export class DelayedWriter {
     }
 
     cleanup();
+
+    return inputs!;
   }
 }
 
 export const wait = (time: number): DelayedWriter =>
-  new DelayedWriter(Deno.stdout, time).wait();
+  new DelayedWriter().wait(time);
 
 export const write = (text: string, time: number): DelayedWriter =>
-  new DelayedWriter(Deno.stdout, time).write(text);
+  new DelayedWriter().write(text, time);
 
 export const doWait = (time: number, abort?: AbortSignal): Promise<void> =>
-  wait(time).do(abort);
+  wait(time).do(abort).then(noop);
 
 export const doWrite = (
   text: string,
   time: number,
   abort?: AbortSignal,
-): Promise<void> => write(text, time).do(abort);
+): Promise<void> => write(text, time).do(abort).then(noop);

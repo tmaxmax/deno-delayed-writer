@@ -7,9 +7,13 @@ const abortAfter = (time: number) => {
   return [abort.signal, () => clearTimeout(handle)] as const;
 };
 
-await write("Hello world!\n", 500)
+const [signal, clearAbort] = abortAfter(1600);
+
+const [howIsUser] = await write("Hello world!\n", 500)
   .wait()
-  .write("How are you?\n")
+  .input("How are you? ")
   .wait()
-  .write(`I'm glad you're fine!\n`)
-  .do();
+  .do(signal);
+
+clearAbort();
+console.log(howIsUser);
